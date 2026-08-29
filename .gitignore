@@ -1,0 +1,10 @@
+# Configuration / local credentials
+.gatorconfig.json
+
+# Binaries
+/gator
+*.exe
+*.out
+
+# Environment variables / local overrides
+.env
