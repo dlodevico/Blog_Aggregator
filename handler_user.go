@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"os"
 	"time"
 
@@ -104,42 +105,59 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
-// scrapeFeeds fetches the oldest (or unfetched) feed from the DB, marks it, and logs item titles.
 func scrapeFeeds(s *state) error {
 	ctx := context.Background()
 
-	// 1. Get next feed to fetch
 	feed, err := s.db.GetNextFeedToFetch(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			fmt.Println("No feeds found to scrape.")
 			return nil
 		}
-		return fmt.Errorf("could not get next feed to fetch: %w", err)
+		return fmt.Errorf("could not get next feed: %w", err)
 	}
 
-	// 2. Mark feed as fetched
 	now := time.Now().UTC()
 	_, err = s.db.MarkFeedFetched(ctx, database.MarkFeedFetchedParams{
 		LastFetchedAt: sql.NullTime{Time: now, Valid: true},
 		ID:            feed.ID,
 	})
 	if err != nil {
-		return fmt.Errorf("could not mark feed '%s' as fetched: %w", feed.Name, err)
+		return fmt.Errorf("could not mark feed as fetched: %w", err)
 	}
 
-	// 3. Fetch RSS content
 	rssFeed, err := rss.FetchFeed(ctx, feed.Url)
 	if err != nil {
-		return fmt.Errorf("could not fetch feed '%s' (%s): %w", feed.Name, feed.Url, err)
+		return fmt.Errorf("could not fetch feed '%s': %w", feed.Name, err)
 	}
 
-	// 4. Iterate over items and print details
-	fmt.Printf("\n--- Scraping feed: %s (%d items found) ---\n", rssFeed.Channel.Title, len(rssFeed.Channel.Item))
 	for _, item := range rssFeed.Channel.Item {
-		fmt.Printf("* %s\n", item.Title)
+		description := sql.NullString{
+			String: item.Description,
+			Valid:  item.Description != "",
+		}
+
+		pubTime := rss.ParsePublishedAt(item.PubDate)
+
+		_, err := s.db.CreatePost(ctx, database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: description,
+			PublishedAt: pubTime,
+			FeedID:      feed.ID,
+		})
+		if err != nil {
+			// Ignore duplicate URL constraint violations
+			if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "posts_url_key") {
+				continue
+			}
+			fmt.Printf("Error saving post '%s': %v\n", item.Title, err)
+		}
 	}
 
+	fmt.Printf("Fetched feed '%s' (%d items processed)\n", feed.Name, len(rssFeed.Channel.Item))
 	return nil
 }
 
